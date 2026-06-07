@@ -44,7 +44,7 @@ export const EXTRACTED_QUOTE_JSON_SCHEMA = {
         properties: {
           category: {
             type: 'string',
-            description: 'Uppercase category, e.g. "ALIMENTATION EF/EC", "ÉVACUATION EU/EV", "SANITAIRES", "CHAUFFAGE", "VENTILATION", "MAIN D\'ŒUVRE".',
+            description: 'Uppercase category from the TCE list, e.g. "ALIMENTATION EF/EC", "ÉVACUATION EU/EV", "SANITAIRES", "ROBINETTERIE", "CHAUFFAGE", "PRODUCTION ECS", "VENTILATION", "CALORIFUGEAGE", "RACCORDEMENTS", "ÉLECTRICITÉ CFO", "ÉLECTRICITÉ CFA", "ÉCLAIRAGE", "GROS ŒUVRE", "MAÇONNERIE", "CHARPENTE/COUVERTURE", "ÉTANCHÉITÉ", "MENUISERIE EXT.", "MENUISERIE INT.", "SERRURERIE/MÉTALLERIE", "CLOISONS/DOUBLAGES", "FAUX-PLAFONDS", "ISOLATION", "CARRELAGE/FAÏENCE", "REVÊTEMENTS SOLS", "REVÊTEMENTS MURAUX", "PEINTURE", "VRD", "ESPACES VERTS", "ASCENSEURS", "SÉCURITÉ INCENDIE/SSI", "DÉSENFUMAGE", "PHOTOVOLTAÏQUE", "MAIN D\'ŒUVRE", "DIVERS".',
           },
           name: {
             type: 'string',
@@ -110,7 +110,7 @@ export const TOC_JSON_SCHEMA = {
           title:     { type: 'string',  description: 'Full title as printed, e.g. "Plomberie sanitaire".' },
           startPage: { type: 'number',  description: 'First page of the lot (1-indexed as printed in the PDF).' },
           endPage:   { type: 'number',  description: 'Last page of the lot, inclusive.' },
-          isPlumbing:{ type: 'boolean', description: 'True iff the lot covers plomberie, sanitaire, alimentation EF/EC, évacuation EU/EV, CVC, chauffage, climatisation, ventilation, VMC, production ECS, calorifugeage or raccordements hydrauliques. False for gros œuvre, électricité, serrurerie, peinture, etc.' },
+          isPlumbing:{ type: 'boolean', description: '[Legacy field name — kept for schema compatibility.] Marks the lot as in-scope for extraction. In TCE mode (all trades supported), set true for every lot that describes physical works of any building trade (plomberie/CVC, électricité, éclairage, gros œuvre, maçonnerie, charpente, étanchéité, menuiserie, serrurerie, cloisons, faux-plafonds, isolation, carrelage, revêtements, peinture, VRD, espaces verts, ascenseurs, SSI, désenfumage, photovoltaïque). Set false ONLY for non-works lots (généralités contractuelles, organisation de chantier, prescriptions administratives, sécurité/PPSPS, qualité/contrôles, plans-types réglementaires) when they contain no chiffrable items.' },
         },
       },
     },
@@ -131,29 +131,32 @@ export const OPENAI_TOC_RESPONSE_FORMAT = {
   },
 }
 
-export const TOC_SYSTEM_PROMPT = `You are indexing the structure of a French CCTP (Cahier des Clauses Techniques Particulières). Your output drives a pipeline that will then extract quantities only from the plumbing-relevant lots.
+export const TOC_SYSTEM_PROMPT = `You are indexing the structure of a French CCTP (Cahier des Clauses Techniques Particulières). The pipeline runs in TCE mode (tous corps d'état) and will extract quantities from every works lot, regardless of trade.
 
 Rules:
 - List every LOT (preferred) or top-level CHAPITRE when the document has no LOT hierarchy.
 - Use the page numbers AS PRINTED in the PDF, not PDF viewer indexes. If a lot spans pages 14–27, return startPage=14, endPage=27.
 - Be inclusive on boundaries — when in doubt, round ranges outward rather than inward. Downstream cost of an extra page is negligible; missing a page drops line items.
-- isPlumbing=true for: plomberie, sanitaire, alimentation EF/EC, évacuation EU/EV, CVC, chauffage, climatisation, ventilation, VMC, production ECS, calorifugeage, raccordements hydrauliques, désenfumage quand lié à la CVC. isPlumbing=false for everything else (gros œuvre, maçonnerie, électricité courants forts/faibles, serrurerie, menuiserie, peinture, revêtements de sol, cloisons, faux-plafonds, ascenseurs, espaces verts, VRD hors réseaux humides).
-- If the CCTP is single-trade (no lot structure, one continuous plumbing spec), return one lot covering the whole document with isPlumbing=true.
+- isPlumbing is a legacy field name now meaning "in scope for extraction". Set isPlumbing=true for EVERY lot that describes physical works of any building trade: plomberie/CVC, électricité courants forts & faibles, éclairage, gros œuvre, maçonnerie, charpente/couverture, étanchéité, menuiserie ext./int., serrurerie/métallerie, cloisons/doublages, faux-plafonds, isolation, carrelage/faïence, revêtements sols/muraux, peinture, VRD, espaces verts, ascenseurs, SSI, désenfumage, photovoltaïque.
+- Set isPlumbing=false ONLY for non-works lots that contain no chiffrable items: pure généralités contractuelles, prescriptions administratives, organisation de chantier, PPSPS/sécurité, plans-types réglementaires when separated from any works description.
+- If the CCTP is single-trade (no lot structure, one continuous trade spec), return one lot covering the whole document with isPlumbing=true.
 - If you cannot detect any lot structure at all, return lots=[] and explain in notes.
 - Never invent lots that are not in the document.
 - All text in French.`
 
 // Injected into the user message of the extraction call when the pipeline
-// decides the CCTP is multi-lot and we can narrow scope.
+// decides the CCTP is multi-lot and we can narrow scope. In TCE mode every
+// works lot is in scope (isPlumbing=true), so narrowing only ever drops
+// pure-admin lots (généralités, PPSPS, etc.).
 export function buildScopeInstruction(toc: ExtractedToc): string | null {
-  const plumbing = toc.lots.filter(l => l.isPlumbing)
-  if (plumbing.length === 0) return null
-  if (plumbing.length === toc.lots.length) return null // whole doc is plumbing — no narrowing to do
+  const inScope = toc.lots.filter(l => l.isPlumbing)
+  if (inScope.length === 0) return null
+  if (inScope.length === toc.lots.length) return null // whole doc is in scope — no narrowing to do
 
-  const keep    = plumbing.map(l => `- Lot ${l.number} — ${l.title} (p.${l.startPage}–${l.endPage})`).join('\n')
+  const keep    = inScope.map(l => `- Lot ${l.number} — ${l.title} (p.${l.startPage}–${l.endPage})`).join('\n')
   const skipped = toc.lots.filter(l => !l.isPlumbing).map(l => `Lot ${l.number} — ${l.title}`).join(' ; ')
 
-  return `Ce CCTP contient ${toc.lots.length} lots. Concentrez votre extraction UNIQUEMENT sur les lots plomberie/CVC listés ci-dessous. N'extrayez AUCUN article provenant des autres lots.
+  return `Ce CCTP contient ${toc.lots.length} lots. Concentrez votre extraction UNIQUEMENT sur les lots décrivant des travaux chiffrables listés ci-dessous. N'extrayez AUCUN article provenant des autres lots (généralités, prescriptions administratives, organisation de chantier).
 
 Lots à chiffrer :
 ${keep}
@@ -168,7 +171,7 @@ export function buildUserInstruction(scope?: string | null): string {
   return scope ? `${scope}\n\n${base}` : base
 }
 
-export const EXTRACTION_SYSTEM_PROMPT = `You are an expert French "métreur-plombier" (quantity surveyor specialised in plumbing, sanitary, heating and ventilation). You are analysing a CCTP (Cahier des Clauses Techniques Particulières) and producing the bordereau that a contractor will price.
+export const EXTRACTION_SYSTEM_PROMPT = `You are an expert French "métreur tous corps d'état" (quantity surveyor covering every building trade: plomberie/CVC, électricité courants forts & faibles, éclairage, gros œuvre, maçonnerie, charpente/couverture, étanchéité, menuiserie ext./int., serrurerie/métallerie, cloisons/doublages, faux-plafonds, isolation, carrelage/faïence, revêtements sols & muraux, peinture, VRD, espaces verts, ascenseurs, SSI, désenfumage, photovoltaïque). You are analysing a CCTP (Cahier des Clauses Techniques Particulières) and producing the bordereau that a contractor will price.
 
 Your output feeds a real quote for a real contractor. Under-extraction loses them money; invented lines destroy their credibility with the client. Prefer omitting to hallucinating, and always flag what you omitted.
 
@@ -190,17 +193,23 @@ EXTRACTION RULES
    - "p.14"  as a last resort.
    - ""  (empty) only when the item is a legitimate aggregate with no single source paragraph. An empty reference is a red flag the estimator will check.
 
-5. "category" must come from this closed list. Pick the closest match; fall back to "DIVERS" only when nothing else fits:
-   ALIMENTATION EF/EC · ÉVACUATION EU/EV · SANITAIRES · ROBINETTERIE · CHAUFFAGE · PRODUCTION ECS · VENTILATION · CALORIFUGEAGE · RACCORDEMENTS · MAIN D'ŒUVRE · DIVERS
+5. "category" must come from this closed TCE list (tous corps d'état). Pick the closest match; fall back to "DIVERS" only when truly nothing fits:
+   Plomberie/CVC:        ALIMENTATION EF/EC · ÉVACUATION EU/EV · SANITAIRES · ROBINETTERIE · CHAUFFAGE · PRODUCTION ECS · VENTILATION · CALORIFUGEAGE · RACCORDEMENTS
+   Électricité:          ÉLECTRICITÉ CFO · ÉLECTRICITÉ CFA · ÉCLAIRAGE · PHOTOVOLTAÏQUE
+   Structure & enveloppe: GROS ŒUVRE · MAÇONNERIE · CHARPENTE/COUVERTURE · ÉTANCHÉITÉ
+   Second œuvre:         MENUISERIE EXT. · MENUISERIE INT. · SERRURERIE/MÉTALLERIE · CLOISONS/DOUBLAGES · FAUX-PLAFONDS · ISOLATION
+   Finitions:            CARRELAGE/FAÏENCE · REVÊTEMENTS SOLS · REVÊTEMENTS MURAUX · PEINTURE
+   Extérieur & spéciaux: VRD · ESPACES VERTS · ASCENSEURS · SÉCURITÉ INCENDIE/SSI · DÉSENFUMAGE
+   Transverse:           MAIN D'ŒUVRE · DIVERS
 
 6. Unit decision tree — pick the unit that matches the NATURE of the item, not the CCTP's phrasing:
-   - Tubing, câblage, gaines, chemins de câbles, plinthes  → "ml"
-   - Cloisons, isolant en panneaux, surfaces peintes/carrelées  → "m2"
-   - Réservoirs, bacs, volumes d'isolant en vrac  → "m3"
-   - Appareils sanitaires, robinetterie, radiateurs, chaudières, pompes, VMC, accessoires individuels  → "u"
-   - Charges, matériaux livrés au poids  → "kg"
+   - Tubing (cuivre, PER, PVC), câblage électrique (U1000R2V, H07VK), gaines (ICTA, TPC), chemins de câbles, plinthes, baguettes, joints linéaires, gouttières  → "ml"
+   - Cloisons, doublages, isolant en panneaux, faux-plafonds, surfaces peintes/carrelées, étanchéité, dalles, parquet, moquette, voile béton, enduits  → "m2"
+   - Réservoirs, bacs, volumes d'isolant en vrac, béton coulé, terrassement, gravillons  → "m3"
+   - Appareils sanitaires, robinetterie, radiateurs, chaudières, pompes, VMC, luminaires, prises, interrupteurs, disjoncteurs, tableaux, portes, fenêtres, volets, serrures, panneaux PV, capteurs SSI, ascenseurs  → "u"
+   - Charges, matériaux livrés au poids (armatures, aciers, mortiers en sac)  → "kg"
    - Prestations horaires explicites  → "h"
-   - Kits, ensembles facturés en bloc (ex: "ensemble de raccordement")  → "ens"
+   - Kits, ensembles facturés en bloc (ex: "ensemble de raccordement", "kit alarme complet")  → "ens"
    - Pièces détachées vendues à l'unité quand "u" est ambigu  → "pce"
 
 7. Quantities.
@@ -213,7 +222,7 @@ EXTRACTION RULES
    "Non chiffré: <section ou §> — <raison courte>"
    Example: "Non chiffré: §5.4 Raccordement réseau gaz — dépend du concessionnaire".
 
-9. Never invent items not described in the CCTP. If the document is not a CCTP, or the scope is outside plumbing/CVC, or you cannot extract anything useful, return items=[] and explain in notes.
+9. Never invent items not described in the CCTP. If the document is not a CCTP at all (e.g. an invoice, a contract, a marketing brochure), or you cannot extract anything useful, return items=[] and explain in notes. Otherwise, extract whatever trade(s) the CCTP describes — plomberie, électricité, gros œuvre, finitions, etc. — using the appropriate categories.
 
 10. Language: all "name", "description", "reference", "category", "notes" strings must be in French. "unit" uses the enum values above exactly (ml, m2, …).
 
@@ -234,7 +243,7 @@ EXTRACTION RULES
       - { category: "MAIN D'ŒUVRE", name: "Installation complète", quantity: 1, unit: "lot" }   ← lump-sum
     Labour unit MUST be "h". Never "ens", "lot", or "u" for a labour line.
 
-13. Designation specs are mandatory for tubes, fittings, raccords, and calorifugeage. Every such line name MUST contain at least one dimension marker: Ø, DN, mm, x (e.g. "16x1.5"), or a concrete size. "Tube cuivre" alone is invalid; "Tube cuivre Ø16/18 NF EN 1057" is valid. For fixtures (radiateurs, chaudières, sanitaires, VMC), include brand/model where the CCTP specifies one.
+13. Designation specs are mandatory for tubes, fittings, raccords, calorifugeage, câbles électriques, gaines, sections, et profilés. Every such line name MUST contain at least one dimension marker: Ø, DN, mm, mm², x (e.g. "16x1.5", "3G2.5"), or a concrete size. "Tube cuivre" alone is invalid; "Tube cuivre Ø16/18 NF EN 1057" is valid. "Câble U1000R2V" seul est invalide ; "Câble U1000R2V 3G2.5" est valide. For fixtures (radiateurs, chaudières, sanitaires, VMC, luminaires, tableaux, disjoncteurs, portes, fenêtres), include brand/model where the CCTP specifies one.
 
 14. Quantities MUST scale with the project size. A CCTP is often written per-logement/per-apartment/per-salle-de-bains, then repeated for the whole building. You must multiply.
     - BEFORE emitting a fixture quantity, scan the CCTP for the project scale: "N logements", "N appartements", "immeuble de N étages", "N salles de bains", "N T3 + M T4", etc. Record it in a "Projet de X logements" note.
@@ -274,4 +283,32 @@ Anti-example — devis NON-CONFORME — do NOT produce:
 - { category: "DIVERS",        name: "Petits matériels",      quantity: 1,  unit: "lot", reference: "" }
 - { category: "MAIN D'ŒUVRE",  name: "Main d'œuvre",          quantity: 50, unit: "h",   reference: "" }
 - { category: "MAIN D'ŒUVRE",  name: "Installation complète", quantity: 1,  unit: "lot", reference: "" }
-These four lines make the quote non-auditable. A construction engineer cannot verify them, a client cannot compare them, and a technical auditor will reject them. Break each into concrete, quantified tasks or omit them with a "Non chiffré" note.`
+These four lines make the quote non-auditable. A construction engineer cannot verify them, a client cannot compare them, and a technical auditor will reject them. Break each into concrete, quantified tasks or omit them with a "Non chiffré" note.
+
+==============================================
+TCE EXAMPLES — non-plumbing trades
+==============================================
+
+Input excerpt (lot électricité / éclairage):
+"§5.2 Éclairage des bureaux : fourniture et pose de 24 luminaires LED encastrés 600x600 4000K 40W type Philips RC125B, alimentés en câble U1000R2V 3G2.5 sur disjoncteurs C10 du tableau divisionnaire TGBT-N1."
+
+Expected items:
+- { category: "ÉCLAIRAGE", name: "Luminaire LED encastré 600x600 4000K 40W Philips RC125B", description: "Bureaux", quantity: 24, unit: "u", reference: "§5.2", uncertain: false }
+- { category: "ÉLECTRICITÉ CFO", name: "Câble U1000R2V 3G2.5", description: "Alim. luminaires bureaux depuis TGBT-N1", quantity: 0, unit: "ml", reference: "§5.2", uncertain: true } // length to be estimated from plans — flag uncertain and add note
+- { category: "ÉLECTRICITÉ CFO", name: "Disjoncteur C10 monophasé", description: "Protection circuit éclairage bureaux", quantity: 1, unit: "u", reference: "§5.2", uncertain: false }
+
+Input excerpt (lot peinture):
+"§7.1 Mise en peinture acrylique mate finition lessivable, teinte blanc cassé RAL 9010, sur cloisons sèches préalablement enduites, 320 m² au total."
+
+Expected items:
+- { category: "PEINTURE", name: "Peinture acrylique mate lessivable RAL 9010", description: "Cloisons sèches enduites, blanc cassé", quantity: 320, unit: "m2", reference: "§7.1", uncertain: false }
+- { category: "MAIN D'ŒUVRE", name: "Pose 2 couches peinture mate cloisons", description: "320 m² blanc cassé RAL 9010", quantity: 48, unit: "h", reference: "§7.1", uncertain: true }
+
+Input excerpt (lot gros œuvre):
+"§2.4 Dalle béton armé BPS C25/30 ép. 20 cm sur hérisson, surface 184 m², avec treillis soudé ST25C."
+
+Expected items:
+- { category: "GROS ŒUVRE", name: "Béton armé BPS C25/30 ép. 20 cm", description: "Dalle sur hérisson", quantity: 37, unit: "m3", reference: "§2.4", uncertain: false } // 184 m² × 0.20 m = 36.8 m³
+- { category: "GROS ŒUVRE", name: "Treillis soudé ST25C", description: "Armature dalle", quantity: 184, unit: "m2", reference: "§2.4", uncertain: false }
+
+These examples confirm: same discipline (one SKU per line, dimension specs, references, units that match nature) applies regardless of trade.`

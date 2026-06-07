@@ -1,13 +1,14 @@
 'use client'
 
-import { Fragment, useState, useMemo, useEffect } from 'react'
+import { Fragment, Suspense, useState, useMemo, useEffect, useRef } from 'react'
+import { useSearchParams } from 'next/navigation'
 import Modal from '@/components/feedback/Modal'
 import Toast from '@/components/feedback/Toast'
 import Animate from '@/components/feedback/Animate'
 import { useLanguage } from '@/contexts/LanguageContext'
 import { generateQuotePdf } from '@/features/quote/pdf/generateQuotePdf'
 import { SUPPLIERS, SESSION_KEY, type Supplier } from '@/features/catalog/suppliers'
-import { loadStoredQuote } from '@/features/quote/store'
+import { loadStoredQuote, fetchQuoteById, patchQuote } from '@/features/quote/store'
 import { itemsToRows, visualForCategory } from '@/features/quote/mappers/pricing'
 import type { ExtractedQuote, ExtractedToc, QuoteValidation } from '@/features/quote/types'
 import SupplierConnectModal from '@/features/catalog/ui/SupplierConnectModal'
@@ -193,7 +194,10 @@ function buildRows(prices: Supplier['prices']): Row[] {
 }
 
 function buildRowsFromExtracted(quote: ExtractedQuote, prices: Supplier['prices']): Row[] {
-  return itemsToRows(quote.items, prices).map(({ idx, ...rest }) => rest)
+  return itemsToRows(quote.items, prices).map(({ idx: _idx, ...rest }) => {
+    void _idx
+    return rest
+  })
 }
 
 /**
@@ -235,8 +239,20 @@ function colorForCategory(category: string): string {
   return visualForCategory(category).catColor
 }
 
+// Wrapper requis par Next.js 16 : useSearchParams() doit vivre dans une
+// frontière Suspense pour autoriser le pré-rendu statique de la route.
 export default function QuotePage() {
+  return (
+    <Suspense fallback={null}>
+      <QuotePageInner />
+    </Suspense>
+  )
+}
+
+function QuotePageInner() {
   const { t } = useLanguage()
+  const searchParams = useSearchParams()
+  const quoteIdParam = searchParams.get('id')
 
   const [toast, setToast]             = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null)
   const [showApprove, setShowApprove] = useState(false)
@@ -250,20 +266,52 @@ export default function QuotePage() {
   const [toc, setToc]                 = useState<ExtractedToc | null>(null)
   const [validation, setValidation]   = useState<QuoteValidation | null>(null)
   const [devisNumber, setDevisNumber] = useState<string | null>(null)
+  const [quoteDbId, setQuoteDbId]     = useState<string | null>(null)
+  const [savedPrices, setSavedPrices] = useState<Map<string, number> | null>(null)
   const [catalogEntries, setCatalogEntries] = useState<CatalogEntry[]>([])
   const [rows, setRows]               = useState<Row[]>(buildRows(SUPPLIERS[0].prices))
   const [draft, setDraft]             = useState<Row[]>(buildRows(SUPPLIERS[0].prices))
+  const lastSavedRef = useRef<string>('')
 
+  // Initial load: either from /api/quotes/[id] when ?id=... is in the URL
+  // (the user reopened a draft from /projects), or from sessionStorage (just
+  // came from /processing after a fresh extraction).
   useEffect(() => {
+    let cancelled = false
     const saved    = sessionStorage.getItem(SESSION_KEY)
     const supplier = (saved && SUPPLIERS.find(s => s.id === saved)) || SUPPLIERS[0]
-    const stored = loadStoredQuote()
-    if (stored && stored.quote.items.length > 0) setExtracted(stored.quote)
-    if (stored?.toc) setToc(stored.toc)
-    if (stored?.validation) setValidation(stored.validation)
-    if (stored?.devisNumber) setDevisNumber(stored.devisNumber)
     setSelectedSupplierId(supplier.id)
-  }, [])
+
+    async function hydrate() {
+      if (quoteIdParam) {
+        const result = await fetchQuoteById(quoteIdParam)
+        if (cancelled) return
+        if (result) {
+          setExtracted(result.stored.quote)
+          setDevisNumber(result.stored.devisNumber)
+          setQuoteDbId(result.detail.id)
+          if (result.detail.supplierId) setSelectedSupplierId(result.detail.supplierId)
+          if (result.detail.status === 'approved' || result.detail.status === 'sent') setApproved(true)
+          // Persist the prices the user previously saved — these override the
+          // catalog-derived defaults so reloading a quote shows exactly what
+          // the user left it at.
+          const priceMap = new Map<string, number>()
+          for (const l of result.detail.lines) priceMap.set(`${l.idx}|${l.name}`, l.unitPrice)
+          setSavedPrices(priceMap)
+        }
+        return
+      }
+      const stored = loadStoredQuote()
+      if (cancelled) return
+      if (stored && stored.quote.items.length > 0) setExtracted(stored.quote)
+      if (stored?.toc) setToc(stored.toc)
+      if (stored?.validation) setValidation(stored.validation)
+      if (stored?.devisNumber) setDevisNumber(stored.devisNumber)
+      if (stored?.quoteId) setQuoteDbId(stored.quoteId)
+    }
+    hydrate()
+    return () => { cancelled = true }
+  }, [quoteIdParam])
 
   useEffect(() => {
     setSupplierAccounts(getAllAccounts())
@@ -295,17 +343,35 @@ export default function QuotePage() {
     } else {
       built = buildRows(supplier.prices)
     }
+    // When reopening a persisted quote, replay the user's last saved prices
+    // on top of the catalog defaults. Match key is `idx|name` so reordering
+    // doesn't accidentally cross-apply.
+    if (savedPrices && savedPrices.size > 0) {
+      built = built.map((r, i) => {
+        const override = savedPrices.get(`${i}|${r.name}`)
+        return override !== undefined && override > 0 ? { ...r, unitNum: override } : r
+      })
+    }
     setRows(built)
     if (!isEditing) setDraft(built.map(r => ({ ...r })))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [extracted, selectedSupplierId, catalogEntries, supplierAccounts])
+  }, [extracted, selectedSupplierId, catalogEntries, supplierAccounts, savedPrices])
 
   // Totals are now computed strictly from extracted rows — no hidden
   // fallbacks. A CCTP with no MOE lines produces laborHT=0, which prompts
   // the plomber to add the missing labour by hand (rows are editable).
   const calcTotals = (r: Row[]) => {
-    const isLabor    = (row: Row) => row.category === "MAIN D'ŒUVRE"
-    const isChantier = (row: Row) => row.category === 'RACCORDEMENTS'
+    const normalizeCategory = (value: string) =>
+      value
+        .toUpperCase()
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/['’`]/g, "'")
+        .replace(/\s+/g, ' ')
+        .trim()
+
+    const isLabor    = (row: Row) => normalizeCategory(row.category) === "MAIN D'OEUVRE"
+    const isChantier = (row: Row) => normalizeCategory(row.category) === 'RACCORDEMENTS'
     const lineTotal  = (row: Row) => row.qtyNum * row.unitNum
 
     const laborHT     = r.filter(isLabor).reduce((s, row) => s + lineTotal(row), 0)
@@ -341,7 +407,46 @@ export default function QuotePage() {
 
   const startEdit  = () => { setDraft(rows.map(r => ({ ...r }))); setIsEditing(true) }
   const cancelEdit = () => { setDraft(rows.map(r => ({ ...r }))); setIsEditing(false) }
-  const saveEdit   = () => { setRows(draft.map(r => ({ ...r }))); setIsEditing(false); setToast({ message: 'Chiffrage mis à jour.', type: 'success' }) }
+  const saveEdit   = async () => {
+    const newRows = draft.map(r => ({ ...r }))
+    setRows(newRows)
+    setIsEditing(false)
+    setToast({ message: 'Chiffrage mis à jour.', type: 'success' })
+    await persistRows(newRows)
+  }
+
+  // Push the current rows + totals + supplier to the DB. Best-effort:
+  // failure shows a toast but doesn't roll back the local state.
+  async function persistRows(currentRows: Row[], opts: { status?: 'draft' | 'approved' } = {}) {
+    if (!quoteDbId) return
+    const totals = calcTotals(currentRows)
+    const payload = {
+      supplierId: selectedSupplierId,
+      vatRate: TVA_RATE,
+      totalHT: totals.subtotalHT,
+      totalTTC: totals.totalTTC,
+      ...(opts.status ? { status: opts.status } : {}),
+      lines: currentRows.map((r, i) => ({
+        idx: i,
+        category: r.category,
+        name: r.name,
+        description: r.sub || '',
+        reference: '',
+        quantity: r.qtyNum,
+        unit: r.qtyUnit,
+        unitPrice: r.unitNum,
+        lineTotalHT: r.qtyNum * r.unitNum,
+        uncertain: !!r.uncertain,
+      })),
+    }
+    const signature = JSON.stringify(payload)
+    if (signature === lastSavedRef.current) return
+    lastSavedRef.current = signature
+    const ok = await patchQuote(quoteDbId, payload)
+    if (!ok) {
+      setToast({ message: 'Sauvegarde échouée — réessayez.', type: 'error' })
+    }
+  }
 
   const updateDraft = (idx: number, field: 'qtyNum' | 'unitNum', raw: string) => {
     const val = parseFloat(raw.replace(/[^0-9.]/g, '')) || 0
@@ -392,10 +497,11 @@ export default function QuotePage() {
     }, 400)
   }
 
-  const handleApprove = () => {
+  const handleApprove = async () => {
     setShowApprove(false)
     setApproved(true)
     setToast({ message: 'Chiffrage approuvé.', type: 'success' })
+    await persistRows(rows, { status: 'approved' })
   }
 
   const displayRows       = isEditing ? draft : rows
@@ -650,7 +756,7 @@ export default function QuotePage() {
                   <div className="w-8 h-8 rounded-lg bg-secondary/10 flex items-center justify-center">
                     <span className="material-symbols-outlined text-secondary text-sm">engineering</span>
                   </div>
-                  <h3 className="font-headline font-bold text-base">Main d'œuvre</h3>
+                  <h3 className="font-headline font-bold text-base">Main d&apos;oeuvre</h3>
                 </div>
                 <div className="space-y-5">
                   {[
@@ -757,7 +863,7 @@ export default function QuotePage() {
                 )}
                 <div className="mt-5 space-y-2">
                   <div className="flex justify-between text-xs text-outline"><span>Matériaux HT</span><span className={`font-mono ${isEditing ? 'text-amber-400/80' : ''}`}>{fmtEur(activeTotals.materialsHT)}</span></div>
-                  <div className="flex justify-between text-xs text-outline"><span>Main d'œuvre</span><span className={`font-mono ${isEditing ? 'text-amber-400/80' : ''}`}>{fmtEur(activeTotals.laborHT)}</span></div>
+                  <div className="flex justify-between text-xs text-outline"><span>Main d&apos;oeuvre</span><span className={`font-mono ${isEditing ? 'text-amber-400/80' : ''}`}>{fmtEur(activeTotals.laborHT)}</span></div>
                   <div className="flex justify-between text-xs text-outline"><span>Chantier & essais</span><span className={`font-mono ${isEditing ? 'text-amber-400/80' : ''}`}>{fmtEur(activeTotals.chantierHT)}</span></div>
                   <div className="border-t border-white/5 pt-2 flex justify-between text-xs text-outline"><span>Total HT</span><span className={`font-mono font-bold ${isEditing ? 'text-amber-400/80' : 'text-on-surface'}`}>{fmtEur(activeTotals.subtotalHT)}</span></div>
                   <div className="flex justify-between text-xs text-outline"><span>TVA (20%)</span><span className={`font-mono ${isEditing ? 'text-amber-400/80' : ''}`}>{fmtEur(activeTotals.tva)}</span></div>
@@ -916,3 +1022,4 @@ function MatchBadge({ method, score }: { method: MatchMethod; score: number }) {
     </span>
   )
 }
+

@@ -15,6 +15,7 @@ import {
   subscribeQuotes,
   visibleQuotes,
   addQuote,
+  hydrateFromApi,
   type Quote,
   type QuoteStatus,
 } from '@/features/quote/registry'
@@ -64,7 +65,11 @@ export default function ProjectsPage() {
 
   useEffect(() => {
     setAllQuotes(getAllQuotes())
-    return subscribeQuotes(q => setAllQuotes([...q]))
+    const unsub = subscribeQuotes(q => setAllQuotes([...q]))
+    // Best-effort: replace the seeded local list with real DB quotes for the
+    // current user. If unauthenticated or offline, the seed stays.
+    hydrateFromApi()
+    return unsub
   }, [])
 
   useEffect(() => {
@@ -234,7 +239,7 @@ export default function ProjectsPage() {
                         const sc  = STATUS_CLASSES[q.status]
                         const org = getOrg(q.orgId)
                         return (
-                          <Animate key={q.id} as="tr" variant="fade-up" delay={i * 30} className="hover:bg-surface-container-high transition-colors group cursor-pointer" onClick={() => router.push('/quote')}>
+                          <Animate key={q.id} as="tr" variant="fade-up" delay={i * 30} className="hover:bg-surface-container-high transition-colors group cursor-pointer" onClick={() => router.push(`/quote?id=${q.id}`)}>
                             <td className="px-6 py-4">
                               <div className="font-semibold text-sm text-on-surface group-hover:text-primary transition-colors">{q.projectName}</div>
                               <div className="text-[10px] text-on-surface-variant mt-0.5">{q.lot}</div>
@@ -294,7 +299,7 @@ export default function ProjectsPage() {
               const org = getOrg(q.orgId)
               return (
                 <Animate key={q.id} variant="fade-up" delay={i * 50}>
-                  <div className="bg-surface-container rounded-2xl border border-outline-variant/10 p-6 hover:border-primary/30 hover:-translate-y-1 transition-all duration-300 cursor-pointer group" onClick={() => router.push('/quote')}>
+                  <div className="bg-surface-container rounded-2xl border border-outline-variant/10 p-6 hover:border-primary/30 hover:-translate-y-1 transition-all duration-300 cursor-pointer group" onClick={() => router.push(`/quote?id=${q.id}`)}>
                     <div className="flex justify-between items-start mb-4">
                       <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold ${sc.classes}`}><span className={`w-1.5 h-1.5 rounded-full ${sc.dot}`} />{statusLabel(q.status)}</span>
                       <div className="flex gap-1" onClick={e => e.stopPropagation()}>

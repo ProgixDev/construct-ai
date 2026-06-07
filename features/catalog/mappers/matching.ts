@@ -1,19 +1,16 @@
-// 4-layer match engine for CCTP item → plumber's catalog entry.
+// Match engine for CCTP item -> catalog entry.
 //
-//   1. exact_code   — if the CCTP cited a distributor reference (rare but free)
-//   2. ean          — if present on the extracted item
-//   3. normalized_label — exact match after accent/case normalization
-//   4. fuzzy_trigram — character-trigram Dice coefficient, constrained by family + unit
-//
-// Below threshold: falls back to public tariff × (1 − family discount %) — the
-// caller receives a MatchResult annotated with the method actually used.
+// Layers:
+//   1. exact distributor reference
+//   2. exact normalized label
+//   3. fuzzy trigram search, first within the guessed family, then across the
+//      full catalog if the family guess looks wrong
+//   4. public tariff fallback
 
 import type { ExtractedItem } from '@/features/quote/types'
 import { familyFor, extractDiameterMm, normalize, type CatalogEntry, type Family, type MatchResult } from '../types'
 
-const TRIGRAM_THRESHOLD = 0.55 // tuned for short technical labels
-
-// ─── Trigram similarity (Dice coefficient) ─────────────────────────────────
+const TRIGRAM_THRESHOLD = 0.55
 
 function trigrams(s: string): Set<string> {
   const norm = ` ${s} `
@@ -29,58 +26,69 @@ function diceCoef(a: Set<string>, b: Set<string>): number {
   return (2 * inter) / (a.size + b.size)
 }
 
-// ─── Public entry point ────────────────────────────────────────────────────
-
 export type MatchContext = {
   entries: CatalogEntry[]
-  /** Plumber's per-family discount %, applied when catalog has no match. */
   discountByFamily: Record<Family, number>
-  /** Public tariff fallback (currently the static supplier catalog baseline). */
   publicTariffFallback: (item: ExtractedItem) => number
+}
+
+function bestFuzzyMatch(entries: CatalogEntry[], query: string, diameter?: number): { entry: CatalogEntry; score: number } | null {
+  if (entries.length === 0) return null
+
+  const queryGrams = trigrams(query)
+  let best: { entry: CatalogEntry; score: number } | null = null
+
+  for (const entry of entries) {
+    let score = diceCoef(queryGrams, trigrams(entry.normalizedLabel))
+    if (diameter && entry.diameterMm && diameter === entry.diameterMm) score += 0.15
+    if (!best || score > best.score) best = { entry, score }
+  }
+
+  return best
 }
 
 export function matchItem(item: ExtractedItem, ctx: MatchContext): MatchResult {
   const fam = familyFor(`${item.category} ${item.name} ${item.description ?? ''}`)
   const normName = normalize(`${item.name} ${item.description ?? ''}`)
-  const diameter = extractDiameterMm(item.name + ' ' + (item.description ?? ''))
+  const diameter = extractDiameterMm(`${item.name} ${item.description ?? ''}`)
 
-  // ── 1. exact item code ─────────────────────────────────────────────────
+  // 1) Exact distributor reference.
   if (item.reference) {
     const ref = item.reference.trim()
     const exact = ctx.entries.find(e => e.itemCode === ref)
     if (exact) return { entry: exact, method: 'exact_code', score: 1.0, unitPriceHT: exact.netPriceHT }
   }
 
-  // ── 2. (future) EAN — ExtractedItem has no EAN field yet, stub for parity ──
-
-  // ── 3. exact normalized label ─────────────────────────────────────────
-  const exactLabel = ctx.entries.find(e =>
-    e.family === fam &&
-    e.normalizedLabel === normName,
-  )
+  // 2) Exact normalized label.
+  const familyEntries = ctx.entries.filter(e => e.family === fam)
+  const exactLabel = familyEntries.find(e => e.normalizedLabel === normName)
   if (exactLabel) {
     return { entry: exactLabel, method: 'normalized_label', score: 0.98, unitPriceHT: exactLabel.netPriceHT }
   }
 
-  // ── 4. fuzzy trigram over family-constrained candidates ────────────────
-  const candidates = ctx.entries.filter(e => e.family === fam)
-  if (candidates.length > 0) {
-    const queryGrams = trigrams(normName)
-    let best: { entry: CatalogEntry; score: number } | null = null
-
-    for (const c of candidates) {
-      // Bias for diameter match — same diameter adds 0.15 to the score ceiling.
-      let s = diceCoef(queryGrams, trigrams(c.normalizedLabel))
-      if (diameter && c.diameterMm && diameter === c.diameterMm) s += 0.15
-      if (!best || s > best.score) best = { entry: c, score: s }
-    }
-
-    if (best && best.score >= TRIGRAM_THRESHOLD) {
-      return { entry: best.entry, method: 'fuzzy_trigram', score: Math.min(best.score, 1), unitPriceHT: best.entry.netPriceHT }
+  // 3) Fuzzy search. Prefer the guessed family, but fall back to the whole
+  // catalog when the family heuristic is clearly wrong or too narrow.
+  const familyMatch = bestFuzzyMatch(familyEntries, normName, diameter)
+  if (familyMatch && familyMatch.score >= TRIGRAM_THRESHOLD) {
+    return {
+      entry: familyMatch.entry,
+      method: 'fuzzy_trigram',
+      score: Math.min(familyMatch.score, 1),
+      unitPriceHT: familyMatch.entry.netPriceHT,
     }
   }
 
-  // ── Fallbacks ─────────────────────────────────────────────────────────
+  const globalMatch = bestFuzzyMatch(ctx.entries, normName, diameter)
+  if (globalMatch && globalMatch.score >= TRIGRAM_THRESHOLD + 0.1) {
+    return {
+      entry: globalMatch.entry,
+      method: 'fuzzy_trigram',
+      score: Math.min(globalMatch.score, 1),
+      unitPriceHT: globalMatch.entry.netPriceHT,
+    }
+  }
+
+  // 4) Fallback.
   const publicPrice = ctx.publicTariffFallback(item)
   const discountPct = ctx.discountByFamily[fam] ?? 0
 
@@ -103,16 +111,15 @@ export function matchItem(item: ExtractedItem, ctx: MatchContext): MatchResult {
 
 export function methodLabel(method: MatchResult['method']): string {
   switch (method) {
-    case 'exact_code':        return 'Réf. exacte'
+    case 'exact_code':        return 'Réf. exacte'
     case 'ean':               return 'Code EAN'
-    case 'normalized_label':  return 'Libellé exact'
-    case 'fuzzy_trigram':     return 'Libellé proche'
+    case 'normalized_label':  return 'Libellé exact'
+    case 'fuzzy_trigram':     return 'Libellé proche'
     case 'discount_fallback': return 'Remise famille'
     case 'public_fallback':   return 'Tarif public'
   }
 }
 
-/** Confidence level for UI colour coding. */
 export function methodTier(method: MatchResult['method']): 'high' | 'medium' | 'low' {
   if (method === 'exact_code' || method === 'ean' || method === 'normalized_label') return 'high'
   if (method === 'fuzzy_trigram' || method === 'discount_fallback') return 'medium'

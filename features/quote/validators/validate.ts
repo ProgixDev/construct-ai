@@ -11,9 +11,11 @@ import type { ExtractedItem, ExtractedQuote, QuoteValidation, Unit, ValidationIs
 
 // ---------- Domain rules ----------
 
-// Closed category whitelist. Mirrors the extraction system prompt.
-// Anything outside this set gets snapped to DIVERS with a warning.
+// Closed category whitelist. Mirrors the extraction system prompt — TCE mode
+// (tous corps d'état). Anything outside this set gets snapped to DIVERS with
+// a warning.
 const CATEGORY_WHITELIST = new Set<string>([
+  // Plomberie / CVC
   'ALIMENTATION EF/EC',
   'ÉVACUATION EU/EV',
   'SANITAIRES',
@@ -23,6 +25,35 @@ const CATEGORY_WHITELIST = new Set<string>([
   'VENTILATION',
   'CALORIFUGEAGE',
   'RACCORDEMENTS',
+  // Électricité
+  'ÉLECTRICITÉ CFO',
+  'ÉLECTRICITÉ CFA',
+  'ÉCLAIRAGE',
+  'PHOTOVOLTAÏQUE',
+  // Structure & enveloppe
+  'GROS ŒUVRE',
+  'MAÇONNERIE',
+  'CHARPENTE/COUVERTURE',
+  'ÉTANCHÉITÉ',
+  // Second œuvre
+  'MENUISERIE EXT.',
+  'MENUISERIE INT.',
+  'SERRURERIE/MÉTALLERIE',
+  'CLOISONS/DOUBLAGES',
+  'FAUX-PLAFONDS',
+  'ISOLATION',
+  // Finitions
+  'CARRELAGE/FAÏENCE',
+  'REVÊTEMENTS SOLS',
+  'REVÊTEMENTS MURAUX',
+  'PEINTURE',
+  // Extérieur & spéciaux
+  'VRD',
+  'ESPACES VERTS',
+  'ASCENSEURS',
+  'SÉCURITÉ INCENDIE/SSI',
+  'DÉSENFUMAGE',
+  // Transverse
   "MAIN D'ŒUVRE",
   'DIVERS',
 ])
@@ -31,16 +62,46 @@ const CATEGORY_WHITELIST = new Set<string>([
 // but flip uncertain=true. Categories outside the whitelist fall through
 // to DIVERS which accepts any unit.
 const UNITS_BY_CATEGORY: Record<string, Set<Unit>> = {
-  'ALIMENTATION EF/EC': new Set<Unit>(['ml', 'u', 'ens', 'pce']),
-  'ÉVACUATION EU/EV':  new Set<Unit>(['ml', 'u', 'ens', 'pce']),
-  'SANITAIRES':          new Set<Unit>(['u', 'ens']),
-  'ROBINETTERIE':        new Set<Unit>(['u', 'ens', 'pce']),
-  'CHAUFFAGE':           new Set<Unit>(['u', 'ml', 'kg', 'ens', 'pce']),
-  'PRODUCTION ECS':      new Set<Unit>(['u', 'ens']),
-  'VENTILATION':         new Set<Unit>(['u', 'ml', 'm2', 'ens', 'pce']),
-  'CALORIFUGEAGE':       new Set<Unit>(['ml', 'm2']),
-  'RACCORDEMENTS':       new Set<Unit>(['u', 'ens']),
-  "MAIN D'ŒUVRE":        new Set<Unit>(['h', 'ens']),
+  // Plomberie / CVC
+  'ALIMENTATION EF/EC':    new Set<Unit>(['ml', 'u', 'ens', 'pce']),
+  'ÉVACUATION EU/EV':      new Set<Unit>(['ml', 'u', 'ens', 'pce']),
+  'SANITAIRES':            new Set<Unit>(['u', 'ens']),
+  'ROBINETTERIE':          new Set<Unit>(['u', 'ens', 'pce']),
+  'CHAUFFAGE':             new Set<Unit>(['u', 'ml', 'kg', 'ens', 'pce']),
+  'PRODUCTION ECS':        new Set<Unit>(['u', 'ens']),
+  'VENTILATION':           new Set<Unit>(['u', 'ml', 'm2', 'ens', 'pce']),
+  'CALORIFUGEAGE':         new Set<Unit>(['ml', 'm2']),
+  'RACCORDEMENTS':         new Set<Unit>(['u', 'ens']),
+  // Électricité
+  'ÉLECTRICITÉ CFO':       new Set<Unit>(['ml', 'u', 'ens', 'pce']),
+  'ÉLECTRICITÉ CFA':       new Set<Unit>(['ml', 'u', 'ens', 'pce']),
+  'ÉCLAIRAGE':             new Set<Unit>(['u', 'ml', 'ens', 'pce']),
+  'PHOTOVOLTAÏQUE':        new Set<Unit>(['u', 'm2', 'ens']),
+  // Structure & enveloppe
+  'GROS ŒUVRE':            new Set<Unit>(['m3', 'm2', 'ml', 'kg', 'u', 'ens']),
+  'MAÇONNERIE':            new Set<Unit>(['m2', 'm3', 'ml', 'kg', 'u']),
+  'CHARPENTE/COUVERTURE':  new Set<Unit>(['m2', 'ml', 'u', 'm3']),
+  'ÉTANCHÉITÉ':            new Set<Unit>(['m2', 'ml', 'u']),
+  // Second œuvre
+  'MENUISERIE EXT.':       new Set<Unit>(['u', 'm2', 'ml']),
+  'MENUISERIE INT.':       new Set<Unit>(['u', 'm2', 'ml']),
+  'SERRURERIE/MÉTALLERIE': new Set<Unit>(['u', 'ml', 'kg', 'm2']),
+  'CLOISONS/DOUBLAGES':    new Set<Unit>(['m2', 'ml', 'u']),
+  'FAUX-PLAFONDS':         new Set<Unit>(['m2', 'ml', 'u']),
+  'ISOLATION':             new Set<Unit>(['m2', 'm3', 'ml']),
+  // Finitions
+  'CARRELAGE/FAÏENCE':     new Set<Unit>(['m2', 'ml', 'u']),
+  'REVÊTEMENTS SOLS':      new Set<Unit>(['m2', 'ml']),
+  'REVÊTEMENTS MURAUX':    new Set<Unit>(['m2', 'ml']),
+  'PEINTURE':              new Set<Unit>(['m2', 'ml', 'u']),
+  // Extérieur & spéciaux
+  'VRD':                   new Set<Unit>(['m2', 'm3', 'ml', 'u', 'kg']),
+  'ESPACES VERTS':         new Set<Unit>(['m2', 'u', 'ml']),
+  'ASCENSEURS':            new Set<Unit>(['u', 'ens']),
+  'SÉCURITÉ INCENDIE/SSI': new Set<Unit>(['u', 'ml', 'ens']),
+  'DÉSENFUMAGE':           new Set<Unit>(['u', 'm2', 'ml', 'ens']),
+  // Transverse
+  "MAIN D'ŒUVRE":          new Set<Unit>(['h', 'ens']),
 }
 
 // Hard per-unit ceilings. A CCTP line requesting 10 000 ml of anything
@@ -86,14 +147,16 @@ const LUMP_SUM_LABOR_PATTERNS: RegExp[] = [
 ]
 
 // Categories whose designations must contain a dimension marker (Ø, DN,
-// mm, or a "NNxNN" size). Extraction prompt already asks for it — this
-// catches the lines where the model slipped.
+// mm, mm², or a "NNxNN" size). Extraction prompt already asks for it —
+// this catches the lines where the model slipped.
 const DIM_REQUIRED_CATEGORIES = new Set<string>([
   'ALIMENTATION EF/EC',
   'ÉVACUATION EU/EV',
   'CALORIFUGEAGE',
+  'ÉLECTRICITÉ CFO',
+  'ÉLECTRICITÉ CFA',
 ])
-const DIM_MARKER_RE = /(ø|Ø|\bdn\s*\d|\b\d{1,3}\s*mm\b|\b\d{1,3}\s*\/\s*\d{1,3}\b|\b\d{1,3}\s*x\s*\d{1,3}\b)/i
+const DIM_MARKER_RE = /(ø|Ø|\bdn\s*\d|\b\d{1,3}\s*mm[²2]?\b|\b\d{1,3}\s*\/\s*\d{1,3}\b|\b\d{1,3}\s*x\s*\d{1,3}\b|\b\d{1,3}\s*g\s*\d(?:[\.,]\d)?\b)/i
 
 // ---------- Helpers ----------
 
@@ -113,6 +176,16 @@ function normalizeName(name: string): string {
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')       // strip accents
     .replace(/[^\p{L}\p{N}øØ/\-.]/gu, ' ') // keep letters, numbers, Ø, /, -, .
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function normalizeCategory(category: string): string {
+  return category
+    .toUpperCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/['’`]/g, "'")
     .replace(/\s+/g, ' ')
     .trim()
 }
@@ -194,7 +267,7 @@ export function validateQuote(quote: ExtractedQuote): {
   // Stage 3b — single-line MOE sanity check. If there's exactly one
   // MAIN D'ŒUVRE line surviving, flag it: a conforme devis needs the
   // labour broken down by task.
-  const moeLines = survivors.filter(i => i.category === "MAIN D'ŒUVRE")
+  const moeLines = survivors.filter(i => normalizeCategory(i.category) === "MAIN D'OEUVRE")
   if (moeLines.length === 1) {
     warnings.push({
       item: truncate(summarize(moeLines[0])),
@@ -269,7 +342,7 @@ function findHardFailure(item: ExtractedItem): string | null {
   }
 
   // Lump-sum labour: a single global MOE line, or labour billed in ens/lot.
-  if (item.category === "MAIN D'ŒUVRE") {
+  if (normalizeCategory(item.category) === "MAIN D'OEUVRE") {
     if (item.unit === 'ens') {
       return 'Main d\u2019œuvre en forfait (unit « ens ») — devis non conforme, détailler en heures par tâche.'
     }

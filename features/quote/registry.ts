@@ -83,7 +83,84 @@ const SEED: Quote[] = [
 type Listener = (quotes: Quote[]) => void
 const listeners = new Set<Listener>()
 
+// In-memory cache of API-backed quotes. When non-null, these replace the
+// localStorage seed in `getAllQuotes()` — i.e. once the API has responded,
+// the page shows real DB rows and the local registry becomes dormant.
+let apiQuotes: Quote[] | null = null
+let hydrating = false
+
+type ApiQuoteSummary = {
+  id: string
+  devisNumber: string
+  projectName: string
+  lot: string
+  client: string
+  sector: string
+  fileName: string
+  supplierId: string
+  status: 'draft' | 'approved' | 'sent' | 'archived'
+  totalHT: number
+  totalTTC: number
+  createdAt: string
+  updatedAt: string
+  approvedAt: string | null
+  sentAt: string | null
+  cctpUploadId: string | null
+  createdBy: string | null
+  lineCount: number
+}
+
+function statusFromApi(s: ApiQuoteSummary['status']): QuoteStatus {
+  return s === 'approved' || s === 'sent' ? 'finalisé'
+       : s === 'archived'                  ? 'archivé'
+       : 'brouillon'
+}
+
+function fmtDateFr(iso: string): string {
+  try {
+    const d = new Date(iso)
+    return d.toLocaleDateString('fr-FR')
+  } catch {
+    return iso.slice(0, 10)
+  }
+}
+
+function mapApiToQuote(api: ApiQuoteSummary): Quote {
+  return {
+    id: api.id,
+    orgId: DEFAULT_SUBSCRIBER_ORG_ID,
+    createdBy: api.createdBy ?? 'u-owner',
+    projectName: api.projectName,
+    lot: api.lot || '—',
+    date: fmtDateFr(api.createdAt),
+    supplier: api.supplierId === 'auto' ? 'IA Optimisé' : api.supplierId,
+    supplierInitials: (api.supplierId === 'auto' ? 'IA' : api.supplierId.slice(0, 3)).toUpperCase(),
+    status: statusFromApi(api.status),
+    lineItems: api.lineCount ?? 0,
+    totalHT: api.totalHT,
+    sector: api.sector || 'Plomberie',
+  }
+}
+
+export async function hydrateFromApi(): Promise<void> {
+  if (typeof window === 'undefined') return
+  if (hydrating) return
+  hydrating = true
+  try {
+    const res = await fetch('/api/quotes', { cache: 'no-store' })
+    if (!res.ok) return
+    const data = await res.json() as { quotes: ApiQuoteSummary[] }
+    apiQuotes = data.quotes.map(mapApiToQuote)
+    listeners.forEach(fn => fn(apiQuotes!))
+  } catch {
+    // Network failure: registry stays on local seed silently.
+  } finally {
+    hydrating = false
+  }
+}
+
 function safeLoad(): Quote[] {
+  if (apiQuotes) return apiQuotes
   if (typeof window === 'undefined') return SEED
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY)

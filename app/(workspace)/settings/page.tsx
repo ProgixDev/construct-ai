@@ -67,9 +67,33 @@ export default function SettingsPage() {
   const [toast, setToast]         = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null)
 
   // Sync tab ↔ ?tab= in URL (supports deep links like /settings?tab=abonnement)
+  // and surface ?checkout=success|cancelled (Stripe redirect targets).
   useEffect(() => {
-    const fromUrl = new URLSearchParams(window.location.search).get('tab')
+    const params = new URLSearchParams(window.location.search)
+    const fromUrl = params.get('tab')
     if (isTab(fromUrl)) setActiveTab(fromUrl)
+
+    const checkout = params.get('checkout')
+    if (checkout === 'success') {
+      setToast({
+        message: 'Paiement confirmé — votre abonnement est actif.',
+        type: 'success',
+      })
+      // Clean the param so a reload doesn't re-toast.
+      params.delete('checkout')
+      const url = new URL(window.location.href)
+      url.search = params.toString()
+      window.history.replaceState(null, '', url.toString())
+    } else if (checkout === 'cancelled') {
+      setToast({
+        message: 'Paiement annulé — aucun changement sur votre compte.',
+        type: 'info',
+      })
+      params.delete('checkout')
+      const url = new URL(window.location.href)
+      url.search = params.toString()
+      window.history.replaceState(null, '', url.toString())
+    }
   }, [])
 
   const selectTab = (tab: Tab) => {

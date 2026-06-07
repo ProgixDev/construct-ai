@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { activatePlan, PAID_PLANS, type Plan } from '@/features/subscription/store'
+import { startCheckout, type CheckoutPlan } from '@/features/subscription/checkout'
 
 type Props = {
   onClose: () => void
@@ -13,6 +14,7 @@ type Props = {
 export default function PaywallModal({ onClose, onSubscribed, reason = 'trial-used' }: Props) {
   const [selected, setSelected] = useState<Exclude<Plan, 'trial'>>('pro')
   const [processing, setProcessing] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const headline = reason === 'trial-used'
     ? 'Votre chiffrage gratuit est utilisé'
@@ -22,15 +24,32 @@ export default function PaywallModal({ onClose, onSubscribed, reason = 'trial-us
     ? 'Passez à un plan payant pour continuer à générer des chiffrage depuis vos CCTP.'
     : 'Comparez nos plans et choisissez celui qui correspond à votre activité.'
 
-  const subscribe = () => {
+  const subscribe = async () => {
+    setError(null)
     setProcessing(true)
-    // Mock checkout — in production this would hit Stripe / billing portal.
-    setTimeout(() => {
+    try {
+      if (selected === 'enterprise') {
+        // Enterprise has no self-service Stripe price — route to a contact form.
+        window.location.href = 'mailto:contact@plombia.fr?subject=Demande%20plan%20Enterprise'
+        return
+      }
+      // Hit /api/billing/checkout. If Stripe is configured server-side we
+      // get back { url } and redirect. If not (dev mode), we get { mocked: true }
+      // and fall back to a local activation so the demo still works.
+      const result = await startCheckout(selected as CheckoutPlan)
+      if (result.kind === 'redirect') {
+        window.location.href = result.url
+        return
+      }
+      // Mocked — activate locally so the UI unlocks immediately.
       activatePlan(selected)
-      setProcessing(false)
       onSubscribed?.(selected)
       onClose()
-    }, 900)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Échec de l’activation')
+    } finally {
+      setProcessing(false)
+    }
   }
 
   return (
@@ -112,6 +131,13 @@ export default function PaywallModal({ onClose, onSubscribed, reason = 'trial-us
             )
           })}
         </div>
+
+        {error && (
+          <div className="relative z-10 mx-8 mb-2 flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300">
+            <span className="material-symbols-outlined text-sm mt-0.5">error</span>
+            <span>{error}</span>
+          </div>
+        )}
 
         <div className="relative z-10 px-8 pb-8 flex flex-col md:flex-row items-stretch md:items-center gap-3">
           <div className="flex-1 text-xs text-on-surface-variant flex items-center gap-2">

@@ -44,3 +44,17 @@ supabase/.temp
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# editors / tools
+.idea/
+.claude/
+
+# local logs
+*.log
+
+# playwright
+/test-results/
+/playwright-report/
+
+# generated test fixtures (kept locally, regenerated via scripts/gen-*.mjs)
+/test-cctps/

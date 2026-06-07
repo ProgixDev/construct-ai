@@ -36,12 +36,16 @@ const CATEGORY_VISUALS: { match: RegExp; v: Visual }[] = [
 
 const DEFAULT_VISUAL: Visual = { icon: 'build', iconBg: 'bg-white/5', iconColor: 'text-on-surface-variant', catColor: 'text-on-surface' }
 
-function bucketFor(item: ExtractedItem): Bucket {
+// Returns the bucket the item matches, or null when no plumbing keyword fits.
+// Non-plumbing items (éclairage, gros œuvre, peinture, etc.) must NOT inherit
+// the PER bucket — better to surface a 0€ that the estimator fills in than a
+// bogus 16€/u default that looks like it was actually priced.
+function bucketFor(item: ExtractedItem): Bucket | null {
   const haystack = `${item.category} ${item.name} ${item.description ?? ''}`
   for (const { bucket, patterns } of BUCKET_KEYWORDS) {
     if (patterns.some(p => p.test(haystack))) return bucket
   }
-  return 0
+  return null
 }
 
 export function visualForCategory(category: string): Visual {
@@ -54,14 +58,19 @@ export function visualForCategory(category: string): Visual {
  * (linear metre vs unit, diameters, etc.) by a simple factor table.
  */
 export function unitPriceFor(item: ExtractedItem, prices: Supplier['prices']): number {
+  // Labour gets a deterministic hourly rate regardless of bucket match.
+  if (item.unit === 'h') return Math.max(45, prices[2] * 0.12)
+
   const b = bucketFor(item)
+  // No plumbing bucket match → leave the price empty (0 €). The estimator
+  // will fill it in manually for non-plumbing trades (éclairage, gros œuvre,
+  // peinture, etc.) or once a real catalog connector returns a price.
+  if (b === null) return 0
   const base = prices[b]
 
   // Scale based on unit: linear-metre items are priced at their catalog value,
-  // unit items (u, ens, pce) use the catalog value directly, services (h) get a
-  // labour rate derived from bucket 2 (sanitaire) as a rough proxy.
+  // unit items (u, ens, pce) use the catalog value directly.
   const name = item.name.toLowerCase()
-  if (item.unit === 'h')   return Math.max(45, prices[2] * 0.12) // hourly labour
   if (item.unit === 'kg')  return base * 0.08
   if (item.unit === 'm2')  return base * 0.6
   if (item.unit === 'm3')  return base * 1.2
