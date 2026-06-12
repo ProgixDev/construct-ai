@@ -1,7 +1,6 @@
 'use client'
 
 import { FormEvent, useState } from 'react'
-import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { useLanguage } from '@/contexts/LanguageContext'
 import Animate from '@/components/feedback/Animate'
@@ -12,7 +11,6 @@ import { signInWithPassword, signUpWithPassword } from '@/features/auth/api'
 type Mode = 'login' | 'signup'
 
 export default function AuthPage() {
-  const router = useRouter()
   const { t, locale, setLocale } = useLanguage()
 
   const [mode, setMode] = useState<Mode>('login')
@@ -82,7 +80,12 @@ export default function AuthPage() {
           return
         }
       }
-      router.push('/dashboard')
+      // Full-page navigation (not router.push). The auth provider lives at the
+      // app root and does NOT remount on a soft navigation, so a client-side
+      // push would land on /dashboard with the stale logged-out state until a
+      // manual refresh. A hard navigation reloads with the freshly-set session
+      // cookie, so the server sees the user and the provider re-fetches /api/me.
+      window.location.assign('/dashboard')
     } finally {
       setIsSubmitting(false)
     }

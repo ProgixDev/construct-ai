@@ -61,7 +61,7 @@ export async function signOut() {
  * to redirect to /auth. Any other status throws.
  */
 export async function fetchMe(): Promise<MePayload | null> {
-  const res = await fetch('/api/me', { credentials: 'include' })
+  const res = await fetch('/api/me', { credentials: 'include', cache: 'no-store' })
   if (res.status === 401) return null
   if (!res.ok) {
     const body = await res.json().catch(() => null) as { error?: { message?: string } } | null
